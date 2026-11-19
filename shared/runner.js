@@ -1,5 +1,6 @@
 import {codes, neutral, readPad, valid} from "./controls.js";
 import {socket, localDescription} from "./peer.js";
+import {fullscreenControl, picturePoint} from "./fullscreen.js";
 import {seatControls} from "./seats.js";
 
 const peers = new Map();
@@ -15,6 +16,7 @@ const log = text => {
   events.textContent += new Date().toLocaleTimeString()+" "+text+"\n";
   events.scrollTop = events.scrollHeight;
 };
+const showFullscreen = fullscreenControl(() => run?.output, log);
 function send(message) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
@@ -83,9 +85,9 @@ function bindGameInput(output) {
     if (!localPlayer || !e.isPrimary || (event !== "pointermove" && e.button !== 0)) return;
     if (event === "pointerdown") output.focus();
     if (!canPlayLocally() || localPlayer.seat !== 1) return;
-    const rect = output.getBoundingClientRect();
-    localInput.x = Math.min(1,Math.max(0,(e.clientX-rect.left)/rect.width));
-    localInput.y = Math.min(1,Math.max(0,(e.clientY-rect.top)/rect.height));
+    const point = picturePoint(output,e);
+    if (!point) return;
+    Object.assign(localInput,point);
     if (event === "pointerdown") {
       output.setPointerCapture(e.pointerId);
       localInput.down = true;
@@ -222,6 +224,7 @@ function showRoom(next) {
   const phase = room?.phase;
   arm.textContent = !room ? "Enable runner and audio" : phase === "idle" ? "Start session" : "End session";
   arm.disabled = phase === "stopping";
+  showFullscreen(phase === "streaming");
   status.textContent = (room?.seat ? "Player " + room.seat + " · " : "") + ({
     idle:"Ready to start.", starting:"Starting FIFA…", stopping:"Ending session…",
     streaming:localPlayer ? "Click the picture to play." : "FIFA is running. Keep this window visible.",

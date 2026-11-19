@@ -1,8 +1,10 @@
 import {codes,neutral,readPad} from "./controls.js";
 import {socket,localDescription} from "./peer.js";
+import {fullscreenControl, picturePoint} from "./fullscreen.js";
 import {seatControls} from "./seats.js";
 const el = id=>document.getElementById(id);
 const video=el("screen"), status=el("status"), sound=el("sound");
+const gameArea=el("game-area");
 let ws, seat, session, pc, channel, keys=0, x=.5, y=.5, down=false;
 let seq=0, signature="", last=0, padIndex, enabled=false;
 let leavingSeat = false;
@@ -11,6 +13,7 @@ const showSeats = seatControls(send, () => {
   clearPeer();
 });
 const say = message => status.textContent=message;
+const showFullscreen = fullscreenControl(() => gameArea, say);
 function transmit(force=false) {
   if (channel?.readyState!=="open" || channel.bufferedAmount>2048) return;
   const s=neutral();
@@ -86,6 +89,7 @@ function showRoom(state) {
   const phase=state?.phase;
   const playing=!!state?.seat && phase==="streaming";
   showSeats(state);
+  showFullscreen(playing);
   el("match").hidden=!playing;
   if (!state) return;
 
@@ -153,7 +157,7 @@ function inviteRoom() {
 }
 
 inviteRoom();
-sound.onclick=()=>{play();video.focus();};
+sound.onclick=()=>{play();gameArea.focus();};
 for (const event of ["keydown","keyup"]) window.addEventListener(event,e=>{
   const i=codes.indexOf(e.code);
   if (channel?.readyState!=="open" || i<0 || e.metaKey || e.altKey || (e.target.tagName==="BUTTON" && ["Enter","Space"].includes(e.code))) return;
@@ -162,16 +166,17 @@ for (const event of ["keydown","keyup"]) window.addEventListener(event,e=>{
   transmit();
 });
 function pointer(e) {
+  if(e.type==="pointerdown") gameArea.focus();
   if (seat!==1 || channel?.readyState!=="open") return;
-  const rect=video.getBoundingClientRect();
-  x=Math.min(1,Math.max(0,(e.clientX-rect.left)/rect.width));
-  y=Math.min(1,Math.max(0,(e.clientY-rect.top)/rect.height));
-  if(e.type==="pointerdown") {video.setPointerCapture(e.pointerId);video.focus();down=true;}
+  const point = picturePoint(video,e);
+  if (!point) return;
+  ({x,y} = point);
+  if(e.type==="pointerdown") {gameArea.setPointerCapture(e.pointerId);down=true;}
   if(e.type==="pointerup") down=false;
   enabled=true;transmit();
 }
-for(const event of ["pointerdown","pointerup","pointermove"]) video.addEventListener(event,pointer);
-video.addEventListener("pointercancel",release);
+for(const event of ["pointerdown","pointerup","pointermove"]) gameArea.addEventListener(event,pointer);
+gameArea.addEventListener("pointercancel",release);
 window.addEventListener("blur",release);
 window.addEventListener("focus",()=>{enabled=true;});
 window.addEventListener("gamepadconnected",()=>{enabled=document.hasFocus();});

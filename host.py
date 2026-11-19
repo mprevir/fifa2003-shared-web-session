@@ -50,7 +50,7 @@ def main():
 
     required = (*LOCK["runtime"], "boxedwine.zip", "fifa325-pad.zip", "runner.html",
                 "shared-game.html", "shared-shell.js", "room.html", "runner.js", "player.js",
-                "peer.js", "controls.js", "seats.js", "game-bridge.js")
+                "peer.js", "controls.js", "seats.js", "fullscreen.js", "game-bridge.js")
     if any(not (STAGE / name).is_file() for name in required) or not (HERE / "node_modules" / "ws" / "package.json").is_file():
         raise ValueError("Prepared files are missing. Run python prepare.py first.")
 

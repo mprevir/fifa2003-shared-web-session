@@ -37,7 +37,7 @@ async function inviteSettings() {
 }
 
 const room = await inviteSettings();
-const playerAssets = new Set(["/player.js", "/peer.js", "/controls.js", "/seats.js"]);
+const playerAssets = new Set(["/player.js", "/peer.js", "/controls.js", "/seats.js", "/fullscreen.js"]);
 
 const mimeTypes = new Map([
     [".css", "text/css; charset=utf-8"],
