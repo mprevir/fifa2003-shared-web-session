@@ -1,6 +1,8 @@
 # FIFA 2003 shared web session
 
-The host needs their own copy of FIFA 2003 for Windows. Use your installed copy or download a copy you are authorized to use from the [Internet Archive](https://archive.org/search?query=FIFA+2003). This setup supports the English PC Build 325 executable. Install or extract the game before continuing. Use a complete installation for the original music and commentary. Preparation packages the assets present in your copy.
+The host needs their own copy of FIFA 2003 for Windows. Use your installed copy or download a copy you are authorized to use from the [Internet Archive](https://archive.org/search?query=FIFA+2003). This setup was tested with the English PC Build 325 executable, but theoretically any should do. 
+
+Install or extract the game before continuing. Use a complete installation for the original music and commentary. Preparation packages the assets present in your copy.
 
 One Windows PC runs FIFA in a dedicated browser window called the **runner**. Two players join the same match from desktop browsers, either on that PC or on the same LAN. Only the runner PC needs the game. Either player can take Player 1 and operate the menus.
 
