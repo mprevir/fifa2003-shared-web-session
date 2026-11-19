@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from prepare import CONFIG, HERE, LOCK, STAGE, read_settings
+from prepare import CONFIG, HERE, native_executable, read_settings
 
 SHARED = HERE / "shared"
 
@@ -23,6 +23,14 @@ def stop(process):
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
+
+
+def stop_origin(process):
+    process.stdin.close()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        stop(process)
 
 
 def find_caddy(config_path, configured):
@@ -46,18 +54,17 @@ def public_certificate(caddy, env):
 
 def main():
     config_path = CONFIG
-    config = read_settings()["host"]
-
-    required = (*LOCK["runtime"], "boxedwine.zip", "fifa325-pad.zip", "runner.html",
-                "shared-game.html", "shared-shell.js", "room.html", "runner.js", "player.js",
-                "peer.js", "controls.js", "seats.js", "fullscreen.js", "game-bridge.js")
-    if any(not (STAGE / name).is_file() for name in required) or not (HERE / "node_modules" / "ws" / "package.json").is_file():
+    settings = read_settings()
+    config = settings["host"]
+    env = os.environ.copy()
+    env["FIFA_NATIVE_EXE"] = str(native_executable(settings))
+    if not (HERE / "node_modules" / "ws" / "package.json").is_file():
         raise ValueError("Prepared files are missing. Run python prepare.py first.")
+    env["FIFA_MANAGED_HOST"] = "1"
 
     node = shutil.which("node")
     if not node:
         raise ValueError("Install Node.js before starting the invite host.")
-    env = os.environ.copy()
     for option, default in (("reconnect_seconds", 30), ("startup_seconds", 180)):
         value = config.getint(option, fallback=default)
         if not 1 <= value <= 600:
@@ -83,9 +90,9 @@ def main():
 
     with ExitStack() as processes:
         origin = subprocess.Popen([node, "server.mjs"], cwd=HERE, env=env,
-                                  stdout=subprocess.PIPE, text=True, encoding="utf-8")
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
         processes.callback(origin.stdout.close)
-        processes.callback(stop, origin)
+        processes.callback(stop_origin, origin)
         services = {"Node": origin}
         ready = origin.stdout.readline()
         if not ready:
@@ -93,6 +100,7 @@ def main():
         listener = json.loads(ready)
         env["FIFA_UPSTREAM"] = listener["upstream"]
         print(f"Windows runner (keep this URL private): {listener['runnerUrl']}", flush=True)
+        print(f"Local player address: http://{listener['upstream']}/", flush=True)
         if lan_ip:
             proxy = subprocess.Popen([caddy, "run", "--config", str(SHARED / "Caddyfile"), "--adapter", "caddyfile"],
                                      cwd=HERE, env=env)

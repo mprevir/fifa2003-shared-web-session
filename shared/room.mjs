@@ -1,8 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
-import { lanPlayer, localRunner } from "./service.mjs";
+import { localRunner, playerOrigin } from "./service.mjs";
 
-export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startupMs }) {
+export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startupMs, nativeGame }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   const visitors = new Set();
   const seats = new Map();
@@ -27,7 +27,7 @@ export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startup
   }
 
   function connectPeer(visitor) {
-    if (visitor === runner || !visitor.ws || visitor.peer || session.phase !== "streaming") return;
+    if (!visitor.ws || visitor.peer || session.phase !== "streaming") return;
     visitor.peer = randomUUID();
     send(runner.ws, { type: "peer", session: session.id, seat: visitor.seat, peer: visitor.peer });
   }
@@ -54,6 +54,7 @@ export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startup
     clearTimeout(cleanupTimer);
     for (const player of seats.values()) releaseSeat(player);
     session = null;
+    nativeGame.stop();
     snapshot();
   }
 
@@ -62,19 +63,35 @@ export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startup
     clearTimeout(cleanupTimer);
     reason = message;
     session.phase = "stopping";
+    nativeGame.stop();
     for (const player of seats.values()) releaseSeat(player);
     send(runner.ws, { type: "stop", session: session.id });
     snapshot();
     cleanupTimer = setTimeout(() => runner?.ws.terminate(), 10000);
   }
 
-  function start() {
-    if (session) return;
-    reason = undefined;
-    session = { id: randomUUID(), phase: "starting" };
-    send(runner.ws, { type: "start", session: session.id });
+  function waitForCapture() {
+    clearTimeout(cleanupTimer);
     cleanupTimer = setTimeout(() => stop("Game startup timed out."), startupMs);
     snapshot();
+  }
+
+  async function start() {
+    if (session) return;
+    reason = undefined;
+    const current = session = { id: randomUUID(), phase: "starting" };
+    const isStarting = () => session === current && current.phase === "starting";
+    waitForCapture();
+
+    try {
+      await nativeGame.start(message => {
+        if (session === current) stop(message);
+      }, isStarting);
+      if (isStarting()) send(runner.ws, { type: "start", session: current.id });
+    } catch (error) {
+      console.error("Could not launch native FIFA:", error);
+      if (isStarting()) stop("Could not launch FIFA. See the host terminal.");
+    }
   }
 
   function registerVisitor(ws, credential) {
@@ -132,12 +149,16 @@ export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startup
     if (message.type === "stop") return stop();
     if (message.type === "stopped" && session.phase === "stopping") return reset();
     if (message.type === "error") return stop(String(message.reason ?? "The game runner failed.").slice(0, 200));
+    if (message.type === "capture_lost" && session.phase !== "stopping") {
+      session.phase = "starting";
+      for (const visitor of seats.values()) disconnectPeer(visitor);
+      return waitForCapture();
+    }
     if (message.type === "ready" && session.phase === "starting") {
       clearTimeout(cleanupTimer);
       session.phase = "streaming";
       return updateRoom();
     }
-    if (message.type === "claim" || message.type === "leave") return playerMessage(runner, message);
     const visitor = seats.get(message.seat);
     if (session.phase !== "streaming" || !visitor?.peer || message.peer !== visitor.peer) return;
     if (message.type === "offer" && typeof message.sdp === "string") {
@@ -169,9 +190,9 @@ export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startup
           protocols?.length !== 2 || protocols[0] !== "fifa-runner" || protocols[1] !== runnerKey) {
         return socket.destroy();
       }
-    } else if (req.url !== "/signal/room" || !lanPlayer(req, playerHost) ||
-               req.headers.origin !== `https://${playerHost}`) {
-      return socket.destroy();
+    } else {
+      const origin = playerOrigin(req, playerHost);
+      if (req.url !== "/signal/room" || !origin || req.headers.origin !== origin) return socket.destroy();
     }
     wss.handleUpgrade(req, socket, head, ws => {
       ws.on("error", () => ws.terminate());

@@ -156,7 +156,6 @@ vite.config.ts.timestamp-*
 .nx/workspace-data
 .nx/migrate-runs
 
-# Generated game and runtime files, private room identity, Python cache
-/stage/
+# Private room identity, Python cache
 /shared/.host/
 __pycache__/

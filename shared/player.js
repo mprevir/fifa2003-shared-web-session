@@ -1,12 +1,10 @@
-import {codes,neutral,readPad} from "./controls.js";
 import {socket,localDescription} from "./peer.js";
-import {fullscreenControl, picturePoint} from "./fullscreen.js";
+import {fullscreenControl} from "./fullscreen.js";
 import {seatControls} from "./seats.js";
 const el = id=>document.getElementById(id);
-const video=el("screen"), status=el("status"), sound=el("sound");
+const video=el("screen"), status=el("status");
 const gameArea=el("game-area");
-let ws, seat, session, pc, channel, keys=0, x=.5, y=.5, down=false;
-let seq=0, signature="", last=0, padIndex, enabled=false;
+let ws, seat, session, phase, pc;
 let leavingSeat = false;
 const showSeats = seatControls(send, () => {
   leavingSeat = true;
@@ -14,40 +12,12 @@ const showSeats = seatControls(send, () => {
 });
 const say = message => status.textContent=message;
 const showFullscreen = fullscreenControl(() => gameArea, say);
-function transmit(force=false) {
-  if (channel?.readyState!=="open" || channel.bufferedAmount>2048) return;
-  const s=neutral();
-  if (enabled && !document.hidden && document.hasFocus()) {
-    Object.assign(s,{keys,x,y,down});
-    const pads=Array.from(navigator.getGamepads?.() || []);
-    const pad=pads[padIndex] || pads.find(p=>p?.connected);
-    padIndex=pad?.index;
-    readPad(s,pad,seat);
-  }
-  const next=JSON.stringify(s), now=performance.now();
-  if (!force && next===signature && now-last<90) return;
-  channel.send(JSON.stringify({...s,seq:++seq}));
-  signature=next;
-  last=now;
-}
-function release() {
-  enabled=false; keys=0; down=false; padIndex=undefined;
-  transmit(true);
-}
 function clearPeer() {
-  release();
-  channel=null;
   pc?.close();pc=null;
-  video.srcObject=null;sound.hidden=true;
+  video.srcObject=null;
   el("stats").textContent="";
   el("reconnect").hidden=true;
 }
-async function play() {
-  const stream=video.srcObject;
-  try {await video.play();if (video.srcObject===stream) sound.hidden=true;}
-  catch {if (video.srcObject===stream) sound.hidden=false;}
-}
-
 function send(message) {
   if (ws?.readyState===WebSocket.OPEN) ws.send(JSON.stringify(message));
 }
@@ -65,15 +35,7 @@ async function receiveOffer(m) {
     if (pc===current) streamFailed(message);
   };
   current.ontrack=e=>{
-    if (pc===current) {video.srcObject=e.streams[0];play();}
-  };
-  current.ondatachannel=e=>{
-    if (pc!==current) return;
-    const controls=channel=e.channel;
-    controls.onopen=()=>{
-      if (channel!==controls) return;
-      enabled=document.hasFocus();transmit(true);
-    };
+    if (pc===current) {video.srcObject=e.streams[0];}
   };
   current.onconnectionstatechange=()=>{
     if (current.connectionState==="failed") failed("The match stream disconnected.");
@@ -97,7 +59,7 @@ function showRoom(state) {
   if (state.seat) text.push(`Player ${state.seat}`);
   if (phase==="offline") text.push("Windows runner offline. Enable it on the host PC.");
   if (phase==="idle") text.push("Waiting for the operator to start FIFA.");
-  if (phase==="starting") text.push("Starting FIFA…");
+  if (phase==="starting") text.push("Waiting for the host to share FIFA…");
   if (phase==="stopping") text.push("Ending session…");
   if (phase==="streaming") {
     if (playing) text.push("FIFA is running.");
@@ -105,11 +67,7 @@ function showRoom(state) {
   }
   if (state.reason) text.push(state.reason);
   say(text.join(" · "));
-  if (playing) {
-    el("guide").textContent=seat===1
-      ? "Click the picture to focus. Use the mouse for menus and assign the keyboard and gamepad to opposite teams at Select Sides."
-      : "Click the picture to focus. Use arrows to move, S to pass, D to shoot, A to lob or tackle, and W for a through ball. If you arrived after kickoff, have Player 1 assign your controller at Select Sides before the next match.";
-  }
+
 }
 
 function inviteRoom() {
@@ -127,11 +85,11 @@ function inviteRoom() {
         try {sessionStorage.setItem(key,credential);} catch {}
       }
       if (m.type==="status") {
-        if (session!==m.session || seat!==m.seat) {
+        if (session!==m.session || seat!==m.seat || (phase==="streaming" && m.phase!=="streaming")) {
           clearPeer();
           leavingSeat = false;
         }
-        session=m.session;seat=m.seat;
+        session=m.session;seat=m.seat;phase=m.phase;
         showRoom(m);
       }
       if (m.type==="offer") receiveOffer(m);
@@ -141,7 +99,7 @@ function inviteRoom() {
     };
     connection.onclose=e=>{
       if (ws!==connection) return;
-      clearPeer();ws=null;session=null;seat=null;leavingSeat=false;showRoom(null);
+      clearPeer();ws=null;session=null;seat=null;phase=null;leavingSeat=false;showRoom(null);
       if (leaving) return;
       if (e.code===1008) return say(e.reason || "Room connection closed. Reload to try again.");
       say("Reconnecting to the room…");
@@ -149,7 +107,7 @@ function inviteRoom() {
     };
   }
   el("reconnect").onclick=()=>ws?.close();
-  window.addEventListener("pagehide",()=>{leaving=true;clearTimeout(retry);});
+  window.addEventListener("pagehide",()=>{leaving=true;clearTimeout(retry);clearPeer();ws?.close();});
   window.addEventListener("pageshow",event=>{
     if (event.persisted) {leaving=false;connect();}
   });
@@ -157,33 +115,6 @@ function inviteRoom() {
 }
 
 inviteRoom();
-sound.onclick=()=>{play();gameArea.focus();};
-for (const event of ["keydown","keyup"]) window.addEventListener(event,e=>{
-  const i=codes.indexOf(e.code);
-  if (channel?.readyState!=="open" || i<0 || e.metaKey || e.altKey || (e.target.tagName==="BUTTON" && ["Enter","Space"].includes(e.code))) return;
-  enabled=true;e.preventDefault();
-  if(event==="keydown") keys|=1<<i; else keys&=~(1<<i);
-  transmit();
-});
-function pointer(e) {
-  if(e.type==="pointerdown") gameArea.focus();
-  if (seat!==1 || channel?.readyState!=="open") return;
-  const point = picturePoint(video,e);
-  if (!point) return;
-  ({x,y} = point);
-  if(e.type==="pointerdown") {gameArea.setPointerCapture(e.pointerId);down=true;}
-  if(e.type==="pointerup") down=false;
-  enabled=true;transmit();
-}
-for(const event of ["pointerdown","pointerup","pointermove"]) gameArea.addEventListener(event,pointer);
-gameArea.addEventListener("pointercancel",release);
-window.addEventListener("blur",release);
-window.addEventListener("focus",()=>{enabled=true;});
-window.addEventListener("gamepadconnected",()=>{enabled=document.hasFocus();});
-window.addEventListener("gamepaddisconnected",release);
-document.addEventListener("visibilitychange",()=>{if(document.hidden) release();else enabled=document.hasFocus();});
-window.addEventListener("pagehide",()=>{release();ws?.close();});
-setInterval(transmit,16);
 setInterval(async ()=>{
   const current=pc;
   if (current?.connectionState!=="connected") return;

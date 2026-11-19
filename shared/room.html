@@ -19,11 +19,10 @@
 <button id="reconnect" hidden>Reconnect stream</button>
 <section id="match" hidden>
   <div id="game-area" role="region" aria-label="Shared FIFA match" tabindex="0">
-    <video id="screen" autoplay playsinline inert></video>
+    <video id="screen" autoplay muted playsinline inert></video>
   </div>
   <button id="fullscreen" hidden title="Press Esc to leave full screen">Full screen</button>
-  <button id="sound" hidden>Play with sound</button>
-  <p id="guide"></p>
+  <p>The Windows host controls this match.</p>
   <output id="stats"></output>
 </section>
 <script type="module" src="/player.js"></script>

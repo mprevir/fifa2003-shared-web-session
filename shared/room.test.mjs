@@ -9,9 +9,9 @@ const runnerKey = "test-runner-key";
 const playerHost = "192.0.2.1:18444";
 const proxyHeaders = { host: playerHost, "x-forwarded-for": "192.0.2.2", "x-forwarded-proto": "https" };
 
-async function roomFixture(t, { reconnectMs = 500, startupMs = 2000 } = {}) {
+async function roomFixture(t, { reconnectMs = 500, startupMs = 2000, nativeGame = { start() {}, stop() {} } } = {}) {
   const server = createServer();
-  attachRoom(server, { runnerKey, playerHost, reconnectMs, startupMs });
+  attachRoom(server, { runnerKey, playerHost, reconnectMs, startupMs, nativeGame });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = `127.0.0.1:${server.address().port}`;
@@ -69,6 +69,46 @@ const openSeats = { 1: "open", 2: "open" };
 const claim = (client, session, seat) => client.send({ type: "claim", session, seat });
 const leave = (client, session, seat) => client.send({ type: "leave", session, seat });
 
+test("a native viewer keeps its seat through capture loss and returns to the lobby when FIFA exits", async t => {
+  let exit;
+  let stopped = false;
+  const room = await roomFixture(t, { nativeGame: {
+    async start(onExit) { exit = onExit; },
+    stop() { stopped = true; },
+  } });
+  const viewer = room.socket("/signal/room");
+  await once(viewer.ws, "open");
+  viewer.send({ type: "hello" });
+  assert.equal((await viewer.next("status")).phase, "offline");
+
+  const runner = await room.runner();
+  runner.send({ type: "start" });
+  const { session } = await runner.next("start");
+  runner.send({ type: "ready", session });
+  await viewer.next("status", status => status.phase === "streaming");
+  claim(viewer, session, 1);
+  const original = await runner.next("peer");
+  assert.equal(original.seat, 1);
+
+  runner.send({ type: "capture_lost", session });
+  await runner.next("leave", message => message.peer === original.peer);
+  const waiting = await viewer.next("status", status => status.phase === "starting" && status.seat === 1);
+  assert.equal(waiting.session, session);
+  assert.equal(stopped, false);
+  runner.send({ type: "ready", session });
+  const replacement = await runner.next("peer");
+  assert.equal(replacement.seat, 1);
+  assert.notEqual(replacement.peer, original.peer);
+
+  exit("FIFA exited (0).");
+  await runner.next("stop");
+  assert.equal(stopped, true);
+  runner.send({ type: "stopped", session });
+  const idle = await viewer.next("status", status => status.phase === "idle" && status.reason);
+  assert.equal(idle.reason, "FIFA exited (0).");
+  assert.deepEqual(idle.seats, openSeats);
+});
+
 test("the runner starts and stops a session with independent, explicit seat claims", async t => {
   const room = await roomFixture(t);
   const first = await room.visitor();
@@ -88,15 +128,15 @@ test("the runner starts and stops a session with independent, explicit seat clai
   assert.deepEqual((await late.next("status")).seats, openSeats);
 
   claim(first, session, 1);
-  claim(runner, session, 1);
-  const [remote, local] = await Promise.all([first, runner].map(client =>
+  claim(late, session, 1);
+  const [remote, local] = await Promise.all([first, late].map(client =>
     client.next("status", m => m.seats[1] === "occupied")));
   assert.deepEqual([remote.seat, local.seat].sort(), [1, null]);
-  const winner = remote.seat ? first : runner;
-  const loser = remote.seat ? runner : first;
+  const winner = remote.seat ? first : late;
+  const loser = remote.seat ? late : first;
   claim(loser, session, 2);
   await loser.next("status", m => m.seat === 2);
-  await late.next("status", m => m.seats[1] === "occupied" && m.seats[2] === "occupied");
+  await runner.next("status", m => m.seats[1] === "occupied" && m.seats[2] === "occupied");
   claim(winner, session, 2);
   await winner.next("status", m => m.seat === 1);
   leave(winner, session, 1);
@@ -143,7 +183,6 @@ test("a dropped Player 1 seat reconnects or expires independently of the session
   first.ws.close();
   assert.equal((await runner.next("leave", m => m.seat === 1)).peer, originalPeer.peer);
   await second.next("status", m => m.seats[1] === "reconnecting");
-  claim(runner, session, 1);
   assert.equal((await runner.next("status", m => m.seats[1] === "reconnecting")).seat, null);
   const returning = await room.visitor(first.credential);
   assert.equal(returning.credential, first.credential);
@@ -163,9 +202,9 @@ test("a dropped Player 1 seat reconnects or expires independently of the session
   assert.equal(expired.phase, "streaming");
   leave(second, session, 2);
   await runner.next("status", m => m.session === session && m.seats[1] === "open" && m.seats[2] === "open");
-  claim(runner, session, 2);
-  await runner.next("status", m => m.seat === 2);
-  leave(runner, session, 2);
+  claim(second, session, 2);
+  await second.next("status", m => m.seat === 2);
+  leave(second, session, 2);
   await runner.next("status", m => m.session === session && !m.seat && m.seats[2] === "open");
 });
 
@@ -173,13 +212,12 @@ test("runner authorization, failed startup, timeout, and runner disconnect", asy
   const room = await roomFixture(t, { startupMs: 500 });
   const runner = await room.runner();
   const invalid = room.socket("/signal/room/other", undefined, proxyHeaders);
-  const localPlayer = room.socket("/signal/room");
   const legacy = room.socket("/signal/player/1");
   const unauthorized = room.socket("/signal/runner", ["fifa-runner", "wrong"]);
   const proxied = room.socket("/signal/runner", ["fifa-runner", runnerKey], proxyHeaders);
-  const rejected = await Promise.all([invalid, localPlayer, legacy, unauthorized, proxied].map(client =>
+  const rejected = await Promise.all([invalid, legacy, unauthorized, proxied].map(client =>
     new Promise(resolve => client.ws.once("close", resolve))));
-  assert.deepEqual(rejected, [1006, 1006, 1006, 1006, 1006]);
+  assert.deepEqual(rejected, [1006, 1006, 1006, 1006]);
   const player = await room.visitor();
   runner.send({ type: "start" });
   const failed = await runner.next("start");

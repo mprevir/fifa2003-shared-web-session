@@ -7,7 +7,12 @@ export function localRunner(req) {
     !("x-forwarded-for" in req.headers) && !("forwarded" in req.headers);
 }
 
-export function lanPlayer(req, playerHost) {
+function lanPlayer(req, playerHost) {
   return loopback(req) && playerHost && req.headers.host === playerHost &&
     req.headers["x-forwarded-proto"] === "https" && !!req.headers["x-forwarded-for"];
+}
+
+export function playerOrigin(req, playerHost) {
+  if (lanPlayer(req, playerHost)) return `https://${playerHost}`;
+  if (localRunner(req)) return `http://${req.headers.host}`;
 }
