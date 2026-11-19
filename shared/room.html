@@ -2,20 +2,17 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FIFA 2003 invite room</title>
+<title>FIFA 2003 lobby</title>
 <style>
   body{max-width:72rem;margin:auto;padding:1rem;font:16px system-ui;background:#111820;color:#eef2f5}
   h1{font-size:1.5rem}button{font:inherit;padding:.4rem .7rem;margin:.15rem}
   video{display:block;max-width:100%;max-height:70vh;background:black;touch-action:none}
   [hidden]{display:none}
 </style>
-<h1>FIFA 2003 invite room</h1>
+<h1>FIFA 2003 lobby</h1>
 <p id="status" role="status">Connecting to the room…</p>
-<button id="start" hidden>Host</button>
-<button id="wait" hidden>Wait</button>
-<button id="cancel" hidden>Cancel wait</button>
-<button id="join" hidden>Join as Player 2</button>
-<button id="stop" hidden>End session</button>
+<button data-seat="1" disabled>Player 1</button>
+<button data-seat="2" disabled>Player 2</button>
 <button id="reconnect" hidden>Reconnect stream</button>
 <section id="match" hidden>
   <video id="screen" autoplay playsinline tabindex="0" aria-label="Shared FIFA match"></video>

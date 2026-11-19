@@ -7,9 +7,9 @@
 https://{$FIFA_LAN_IP}:{$FIFA_LAN_PORT} {
 	bind {$FIFA_LAN_IP}
 	tls internal
-	@players path /room/* /player.js /peer.js /controls.js /signal/room/*
+	@players path / /player.js /peer.js /controls.js /seats.js /signal/room
 	handle @players {
-		reverse_proxy 127.0.0.1:{$FIFA_NODE_PORT}
+		reverse_proxy {$FIFA_UPSTREAM}
 	}
 	handle {
 		respond 404

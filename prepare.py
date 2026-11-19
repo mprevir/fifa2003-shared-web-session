@@ -111,7 +111,7 @@ def stage_launcher():
     if stock.count(marker) != 1:
         raise ValueError("Unexpected Boxedwine launcher HTML")
     shared = HERE / "shared"
-    for name in ("runner.html", "room.html", "runner.js", "player.js", "game-bridge.js", "controls.js", "peer.js"):
+    for name in ("runner.html", "room.html", "runner.js", "player.js", "game-bridge.js", "controls.js", "peer.js", "seats.js"):
         shutil.copyfile(shared / name, STAGE / name)
     shell = (STAGE / "boxedwine-shell.js").read_text(encoding="utf-8")
     mount = "FS.mkdirTree(Config.d_drive);"
