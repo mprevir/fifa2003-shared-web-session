@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "ws": "8.23.0"
+  },
+  "name": "fifa2003-shared-web-session"
+}

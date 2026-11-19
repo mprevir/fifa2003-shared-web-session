@@ -1,0 +1,4 @@
+LIBRARY xinput1_4
+EXPORTS
+    XInputGetState=_ReadPad@8
+    XInputSetState=_VibratePad@8
