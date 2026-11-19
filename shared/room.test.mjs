@@ -5,12 +5,13 @@ import { test } from "node:test";
 import { WebSocket } from "ws";
 import { attachRoom } from "./room.mjs";
 
-const roomId = "test-room";
 const runnerKey = "test-runner-key";
+const playerHost = "192.0.2.1:18444";
+const proxyHeaders = { host: playerHost, "x-forwarded-for": "192.0.2.2", "x-forwarded-proto": "https" };
 
 async function roomFixture(t, { reconnectMs = 500, startupMs = 2000 } = {}) {
   const server = createServer();
-  attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs });
+  attachRoom(server, { runnerKey, playerHost, reconnectMs, startupMs });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = `127.0.0.1:${server.address().port}`;
@@ -21,7 +22,8 @@ async function roomFixture(t, { reconnectMs = 500, startupMs = 2000 } = {}) {
   });
 
   function socket(path, protocols, headers) {
-    const ws = new WebSocket(`ws://${address}${path}`, protocols, { origin: `http://${address}`, headers });
+    const origin = headers?.host ? `https://${headers.host}` : `http://${address}`;
+    const ws = new WebSocket(`ws://${address}${path}`, protocols, { origin, headers });
     sockets.push(ws);
     const pending = [];
     let notify;
@@ -49,7 +51,7 @@ async function roomFixture(t, { reconnectMs = 500, startupMs = 2000 } = {}) {
   return {
     socket,
     async visitor(credential) {
-      const client = socket(`/signal/room/${roomId}`);
+      const client = socket("/signal/room", undefined, proxyHeaders);
       await once(client.ws, "open");
       client.send({ type: "hello", credential });
       client.credential = (await client.next("hello")).credential;
@@ -57,108 +59,149 @@ async function roomFixture(t, { reconnectMs = 500, startupMs = 2000 } = {}) {
     },
     async runner() {
       const client = socket("/signal/runner", ["fifa-runner", runnerKey]);
-      await client.next("runner_online");
+      await client.next("status", m => m.phase === "idle");
       return client;
     },
   };
 }
 
-test("invite queue, competing hosts, held seats, and cleanup", async t => {
+const openSeats = { 1: "open", 2: "open" };
+const claim = (client, session, seat) => client.send({ type: "claim", session, seat });
+const leave = (client, session, seat) => client.send({ type: "leave", session, seat });
+
+test("the runner starts and stops a session with independent, explicit seat claims", async t => {
   const room = await roomFixture(t);
   const first = await room.visitor();
   await first.next("status", m => m.phase === "offline");
   const runner = await room.runner();
-  const second = await room.visitor();
-  const host = await room.visitor();
-  first.send({ type: "wait" });
-  await first.next("status", m => m.position === 1);
-  second.send({ type: "wait" });
-  await second.next("status", m => m.position === 2);
-  first.send({ type: "cancel_wait" });
-  await second.next("status", m => m.position === 1);
-  first.send({ type: "wait" });
-  await first.next("status", m => m.position === 2);
-
-  host.send({ type: "host" });
-  const { session } = await runner.next("start");
   first.send({ type: "host" });
-  await first.next("status", m => m.phase === "starting" && m.waiting);
+  first.send({ type: "start" });
+  first.send({ type: "wait" });
+  const second = await room.visitor();
+  assert.equal((await second.next("status")).phase, "idle");
+  runner.send({ type: "start" });
+  const { session } = await runner.next("start");
+  assert.deepEqual((await first.next("status", m => m.phase === "starting")).seats, openSeats);
   runner.send({ type: "ready", session });
-  await host.next("status", m => m.phase === "streaming" && m.seat === 1);
-  await second.next("status", m => m.seat === 2);
-  const guestPeer = await runner.next("peer", m => m.seat === 2);
+  assert.deepEqual((await runner.next("status", m => m.phase === "streaming")).seats, openSeats);
   const late = await room.visitor();
-  await late.next("status", m => m.full && !m.seat);
+  assert.deepEqual((await late.next("status")).seats, openSeats);
 
-  second.ws.close();
-  const released = await runner.next("leave", m => m.seat === 2);
-  assert.equal(released.peer, guestPeer.peer);
-  await late.next("status", m => m.guestAway && m.full);
-  const returning = await room.visitor(second.credential);
-  await returning.next("status", m => m.seat === 2);
-  const nextPeer = await runner.next("peer", m => m.seat === 2);
-  assert.notEqual(nextPeer.peer, guestPeer.peer);
-  returning.send({ type: "answer", session, peer: guestPeer.peer, sdp: "stale" });
-  returning.send({ type: "answer", session, peer: nextPeer.peer, seat: 1, sdp: "current" });
-  const answer = await runner.next("answer");
-  assert.equal(answer.seat, 2);
-  assert.equal(answer.sdp, "current");
-  returning.send({ type: "stop", session });
-  returning.ws.close();
+  claim(first, session, 1);
+  claim(runner, session, 1);
+  const [remote, local] = await Promise.all([first, runner].map(client =>
+    client.next("status", m => m.seats[1] === "occupied")));
+  assert.deepEqual([remote.seat, local.seat].sort(), [1, null]);
+  const winner = remote.seat ? first : runner;
+  const loser = remote.seat ? runner : first;
+  claim(loser, session, 2);
+  await loser.next("status", m => m.seat === 2);
+  await late.next("status", m => m.seats[1] === "occupied" && m.seats[2] === "occupied");
+  claim(winner, session, 2);
+  await winner.next("status", m => m.seat === 1);
+  leave(winner, session, 1);
+  await second.next("status", m => m.session === session && m.seats[1] === "open" && m.seats[2] === "occupied");
+  claim(second, session, 1);
+  await second.next("status", m => m.seat === 1);
+
+  second.send({ type: "stop", session });
+  leave(loser, session, 2);
+  await second.next("status", m => m.phase === "streaming" && m.seat === 1 && m.seats[2] === "open");
+  claim(first, session, 2);
   await first.next("status", m => m.seat === 2);
-  await late.next("status", m => m.full && !m.guestAway);
-
-  host.send({ type: "stop", session });
+  runner.send({ type: "stop", session });
   await runner.next("stop", m => m.session === session);
-  await first.next("status", m => m.phase === "stopping");
+  for (const client of [first, second]) {
+    const stopping = await client.next("status", m => m.phase === "stopping");
+    assert.equal(stopping.seat, null);
+    assert.deepEqual(stopping.seats, openSeats);
+  }
   runner.send({ type: "stopped", session });
-  await first.next("status", m => m.phase === "idle" && !m.seat);
+  await runner.next("status", m => m.phase === "idle");
+  runner.send({ type: "start" });
+  const next = await runner.next("start");
+  assert.notEqual(next.session, session);
+  claim(first, session, 1);
+  runner.send({ type: "ready", session: next.session });
+  assert.deepEqual((await first.next("status", m => m.session === next.session && m.phase === "streaming")).seats,
+    openSeats);
 });
 
-test("late arrivals, failure and timeout recovery, and host disconnect", async t => {
+test("a dropped Player 1 seat reconnects or expires independently of the session", async t => {
+  const room = await roomFixture(t);
+  const runner = await room.runner();
+  const first = await room.visitor();
+  const second = await room.visitor();
+  runner.send({ type: "start" });
+  const { session } = await runner.next("start");
+  claim(first, session, 1);
+  await first.next("status", m => m.seat === 1 && m.phase === "starting");
+  runner.send({ type: "ready", session });
+  const originalPeer = await runner.next("peer", m => m.seat === 1);
+  claim(second, session, 2);
+  await second.next("status", m => m.seat === 2);
+  first.ws.close();
+  assert.equal((await runner.next("leave", m => m.seat === 1)).peer, originalPeer.peer);
+  await second.next("status", m => m.seats[1] === "reconnecting");
+  claim(runner, session, 1);
+  assert.equal((await runner.next("status", m => m.seats[1] === "reconnecting")).seat, null);
+  const returning = await room.visitor(first.credential);
+  assert.equal(returning.credential, first.credential);
+  await returning.next("status", m => m.seat === 1);
+  const nextPeer = await runner.next("peer", m => m.seat === 1);
+  assert.notEqual(nextPeer.peer, originalPeer.peer);
+  returning.send({ type: "answer", session, peer: originalPeer.peer, sdp: "stale" });
+  returning.send({ type: "answer", session, peer: nextPeer.peer, seat: 2, sdp: "current" });
+  const answer = await runner.next("answer");
+  assert.equal(answer.seat, 1);
+  assert.equal(answer.sdp, "current");
+
+  returning.ws.close();
+  await second.next("status", m => m.seats[1] === "reconnecting");
+  const expired = await second.next("status", m => m.session === session && m.seats[1] === "open");
+  assert.equal(expired.seat, 2);
+  assert.equal(expired.phase, "streaming");
+  leave(second, session, 2);
+  await runner.next("status", m => m.session === session && m.seats[1] === "open" && m.seats[2] === "open");
+  claim(runner, session, 2);
+  await runner.next("status", m => m.seat === 2);
+  leave(runner, session, 2);
+  await runner.next("status", m => m.session === session && !m.seat && m.seats[2] === "open");
+});
+
+test("runner authorization, failed startup, timeout, and runner disconnect", async t => {
   const room = await roomFixture(t, { startupMs: 500 });
   const runner = await room.runner();
-  const invalid = room.socket("/signal/room/other");
+  const invalid = room.socket("/signal/room/other", undefined, proxyHeaders);
+  const localPlayer = room.socket("/signal/room");
+  const legacy = room.socket("/signal/player/1");
   const unauthorized = room.socket("/signal/runner", ["fifa-runner", "wrong"]);
-  const proxied = room.socket("/signal/runner", ["fifa-runner", runnerKey], { "x-forwarded-for": "127.0.0.1" });
-  const rejected = await Promise.all([invalid, unauthorized, proxied].map(client =>
+  const proxied = room.socket("/signal/runner", ["fifa-runner", runnerKey], proxyHeaders);
+  const rejected = await Promise.all([invalid, localPlayer, legacy, unauthorized, proxied].map(client =>
     new Promise(resolve => client.ws.once("close", resolve))));
-  assert.deepEqual(rejected, [1006, 1006, 1006]);
-
-  const host = await room.visitor();
-  const waiter = await room.visitor();
-  waiter.send({ type: "wait" });
-  await waiter.next("status", m => m.waiting);
-  host.send({ type: "host" });
+  assert.deepEqual(rejected, [1006, 1006, 1006, 1006, 1006]);
+  const player = await room.visitor();
+  runner.send({ type: "start" });
   const failed = await runner.next("start");
   runner.send({ type: "error", session: failed.session, reason: "Startup failure" });
   await runner.next("stop");
   runner.send({ type: "ready", session: failed.session });
   runner.send({ type: "stopped", session: failed.session });
-  await waiter.next("status", m => m.phase === "idle" && m.reason === "Startup failure" && m.position === 1);
-  waiter.send({ type: "cancel_wait" });
-  await waiter.next("status", m => !m.waiting);
+  await player.next("status", m => m.phase === "idle" && m.reason === "Startup failure");
 
-  host.send({ type: "host" });
+  runner.send({ type: "start" });
   const timedOut = await runner.next("start");
   await runner.next("stop", m => m.session === timedOut.session);
   runner.send({ type: "stopped", session: timedOut.session });
-  await host.next("status", m => m.phase === "idle" && m.reason?.includes("timed out"));
+  await player.next("status", m => m.phase === "idle" && m.reason?.includes("timed out"));
 
-  waiter.send({ type: "host" });
+  runner.send({ type: "start" });
   const active = await runner.next("start");
   runner.send({ type: "ready", session: active.session });
-  await waiter.next("status", m => m.phase === "streaming" && m.seat === 1 && !m.full);
-  const late = await room.visitor();
-  await late.next("status", m => m.seat === 2);
-  waiter.ws.close();
-  await late.next("status", m => m.hostAway);
-  const returning = await room.visitor(waiter.credential);
-  await returning.next("status", m => m.seat === 1 && m.session === active.session);
-  returning.ws.close();
-  await runner.next("stop", m => m.session === active.session);
-  runner.send({ type: "stopped", session: active.session });
-  await late.next("status", m => m.phase === "idle" && m.reason?.includes("did not reconnect"));
+  await player.next("status", m => m.phase === "streaming");
+  claim(player, active.session, 1);
+  await player.next("status", m => m.seat === 1);
   runner.ws.close();
-  await late.next("status", m => m.phase === "offline");
+  const offline = await player.next("status", m => m.phase === "offline");
+  assert.deepEqual(offline.seats, openSeats);
 });

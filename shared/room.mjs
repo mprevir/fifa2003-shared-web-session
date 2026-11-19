@@ -1,13 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
-import { localRunner } from "./service.mjs";
+import { lanPlayer, localRunner } from "./service.mjs";
 
-const token = () => randomBytes(16).toString("base64url");
-
-export function attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs }) {
+export function attachRoom(server, { runnerKey, playerHost, reconnectMs, startupMs }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   const visitors = new Set();
-  const waiting = new Set();
   const seats = new Map();
   let runner, session, cleanupTimer, reason;
 
@@ -17,58 +14,45 @@ export function attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs }
 
   function snapshot() {
     const phase = session?.phase ?? (runner ? "idle" : "offline");
-    const positions = new Map([...waiting].map((visitor, index) => [visitor, index + 1]));
-    for (const visitor of visitors) {
-      send(visitor.ws, {
+    const occupancy = Object.fromEntries([1, 2].map(seat => {
+      const player = seats.get(seat);
+      return [seat, !player ? "open" : player.ws ? "occupied" : "reconnecting"];
+    }));
+    for (const player of runner ? [runner, ...visitors] : visitors) {
+      send(player.ws, {
         type: "status", phase, reason, session: session?.id,
-        seat: visitor.seat, waiting: waiting.has(visitor),
-        position: positions.get(visitor),
-        hostAway: seats.has(1) && !seats.get(1).ws,
-        guestAway: seats.has(2) && !seats.get(2).ws,
-        full: seats.size === 2,
+        seat: player.seat ?? null, seats: occupancy,
       });
     }
   }
 
-  function assign(seat, visitor) {
-    seats.set(seat, visitor);
-    visitor.seat = seat;
-    waiting.delete(visitor);
-  }
-
-  function assignGuest() {
-    if (session?.phase !== "streaming" || seats.has(2)) return;
-    const guest = waiting.values().next().value ?? [...visitors].find(visitor =>
-      !visitor.seat && visitor.arrivedDuring === session.id);
-    if (guest) assign(2, guest);
-  }
-
   function connectPeer(visitor) {
-    if (!visitor.ws || !visitor.seat || visitor.peer || session?.phase !== "streaming") return;
+    if (visitor === runner || !visitor.ws || visitor.peer || session.phase !== "streaming") return;
     visitor.peer = randomUUID();
-    send(runner, { type: "peer", session: session.id, seat: visitor.seat, peer: visitor.peer });
+    send(runner.ws, { type: "peer", session: session.id, seat: visitor.seat, peer: visitor.peer });
   }
 
   function disconnectPeer(visitor) {
-    if (!visitor.peer || !session) return;
-    send(runner, { type: "leave", session: session.id, seat: visitor.seat, peer: visitor.peer });
+    if (!visitor.peer) return;
+    send(runner?.ws, { type: "leave", session: session.id, seat: visitor.seat, peer: visitor.peer });
     visitor.peer = null;
   }
 
+  function releaseSeat(player) {
+    clearTimeout(player.hold);
+    disconnectPeer(player);
+    seats.delete(player.seat);
+    player.seat = null;
+  }
+
   function updateRoom() {
-    assignGuest();
     snapshot();
-    for (const visitor of seats.values()) connectPeer(visitor);
+    for (const player of seats.values()) connectPeer(player);
   }
 
   function reset() {
     clearTimeout(cleanupTimer);
-    for (const visitor of seats.values()) {
-      clearTimeout(visitor.hold);
-      visitor.seat = null;
-      visitor.peer = null;
-    }
-    seats.clear();
+    for (const player of seats.values()) releaseSeat(player);
     session = null;
     snapshot();
   }
@@ -78,34 +62,30 @@ export function attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs }
     clearTimeout(cleanupTimer);
     reason = message;
     session.phase = "stopping";
-    for (const visitor of seats.values()) disconnectPeer(visitor);
-    send(runner, { type: "stop", session: session.id });
+    for (const player of seats.values()) releaseSeat(player);
+    send(runner.ws, { type: "stop", session: session.id });
     snapshot();
-    cleanupTimer = setTimeout(() => runner?.terminate(), 10000);
+    cleanupTimer = setTimeout(() => runner?.ws.terminate(), 10000);
   }
 
-  function start(visitor) {
-    if (!runner || session) return snapshot();
+  function start() {
+    if (session) return;
     reason = undefined;
     session = { id: randomUUID(), phase: "starting" };
-    assign(1, visitor);
-    send(runner, { type: "start", session: session.id });
+    send(runner.ws, { type: "start", session: session.id });
     cleanupTimer = setTimeout(() => stop("Game startup timed out."), startupMs);
     snapshot();
   }
 
   function registerVisitor(ws, credential) {
-    const returning = [...seats.values()].find(visitor => visitor.token === credential);
-    const visitor = returning ?? { token: token(), arrivedDuring: session?.id };
+    const returning = [...seats.values()].find(player => player.token && player.token === credential);
+    const visitor = returning ?? { token: randomBytes(16).toString("base64url") };
     if (returning) {
       clearTimeout(visitor.hold);
       disconnectPeer(visitor);
-      const previous = visitor.ws;
-      visitor.ws = ws;
-      previous?.close(1008, "This seat was opened in another page.");
-    } else {
-      visitor.ws = ws;
+      visitor.ws?.close(1008, "This seat was opened in another page.");
     }
+    visitor.ws = ws;
     visitors.add(visitor);
     send(ws, { type: "hello", credential: visitor.token });
     updateRoom();
@@ -115,45 +95,41 @@ export function attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs }
   function removeVisitor(visitor, ws) {
     if (visitor.ws !== ws) return;
     visitors.delete(visitor);
-    waiting.delete(visitor);
     visitor.ws = null;
     disconnectPeer(visitor);
-    if (visitor.seat && session.phase !== "stopping") {
+    if (visitor.seat) {
       visitor.hold = setTimeout(() => {
-        if (visitor.seat === 1) return stop("Player 1 did not reconnect in time.");
-        seats.delete(2);
-        visitor.seat = null;
-        updateRoom();
+        releaseSeat(visitor);
+        snapshot();
       }, reconnectMs);
     }
     snapshot();
   }
 
-  function playerMessage(visitor, message) {
-    if (message.type === "host" && !visitor.seat) return start(visitor);
-    if (!visitor.seat && message.type === "wait" && (!session || session.phase === "starting")) {
-      waiting.add(visitor);
-      return snapshot();
-    }
-    if (!visitor.seat && message.type === "cancel_wait") {
-      waiting.delete(visitor);
-      visitor.arrivedDuring = undefined;
-      return snapshot();
-    }
-    if (!visitor.seat && message.type === "join" && session?.phase === "streaming" && !seats.has(2)) {
-      visitor.arrivedDuring = session.id;
+  function playerMessage(player, message) {
+    if (!session || message.session !== session.id || session.phase === "stopping") return;
+    if (message.type === "claim") {
+      const seat = message.seat;
+      if (!player.seat && (seat === 1 || seat === 2) && !seats.has(seat)) {
+        player.seat = seat;
+        seats.set(seat, player);
+      }
       return updateRoom();
     }
-    if (!session || message.session !== session.id || !visitor.seat) return;
-    if (message.type === "stop" && visitor.seat === 1) return stop("Player 1 ended the session.");
-    if (message.type === "answer" && session.phase === "streaming" && visitor.peer &&
-        message.peer === visitor.peer && typeof message.sdp === "string") {
-      send(runner, { type: "answer", session: session.id, seat: visitor.seat, peer: visitor.peer, sdp: message.sdp });
+    if (message.type === "leave") {
+      if (player.seat && player.seat === message.seat) releaseSeat(player);
+      return snapshot();
+    }
+    if (message.type === "answer" && session.phase === "streaming" && player.peer &&
+        message.peer === player.peer && typeof message.sdp === "string") {
+      send(runner.ws, { type: "answer", session: session.id, seat: player.seat, peer: player.peer, sdp: message.sdp });
     }
   }
 
   function runnerMessage(message) {
+    if (message.type === "start") return start();
     if (!session || message.session !== session.id) return;
+    if (message.type === "stop") return stop();
     if (message.type === "stopped" && session.phase === "stopping") return reset();
     if (message.type === "error") return stop(String(message.reason ?? "The game runner failed.").slice(0, 200));
     if (message.type === "ready" && session.phase === "starting") {
@@ -161,6 +137,7 @@ export function attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs }
       session.phase = "streaming";
       return updateRoom();
     }
+    if (message.type === "claim" || message.type === "leave") return playerMessage(runner, message);
     const visitor = seats.get(message.seat);
     if (session.phase !== "streaming" || !visitor?.peer || message.peer !== visitor.peer) return;
     if (message.type === "offer" && typeof message.sdp === "string") {
@@ -186,26 +163,26 @@ export function attachRoom(server, { roomId, runnerKey, reconnectMs, startupMs }
 
   server.on("upgrade", (req, socket, head) => {
     const isRunner = req.url === "/signal/runner";
-    const origin = req.headers.origin;
-    const sameOrigin = origin === `http://${req.headers.host}` || origin === `https://${req.headers.host}`;
-    if (!sameOrigin || (!isRunner && req.url !== `/signal/room/${roomId}`)) return socket.destroy();
     if (isRunner) {
       const protocols = req.headers["sec-websocket-protocol"]?.split(",").map(value => value.trim());
-      if (!localRunner(req) || protocols?.length !== 2 || protocols[0] !== "fifa-runner" || protocols[1] !== runnerKey) {
+      if (!localRunner(req) || req.headers.origin !== `http://${req.headers.host}` ||
+          protocols?.length !== 2 || protocols[0] !== "fifa-runner" || protocols[1] !== runnerKey) {
         return socket.destroy();
       }
+    } else if (req.url !== "/signal/room" || !lanPlayer(req, playerHost) ||
+               req.headers.origin !== `https://${playerHost}`) {
+      return socket.destroy();
     }
     wss.handleUpgrade(req, socket, head, ws => {
+      ws.on("error", () => ws.terminate());
       if (isRunner && runner) return ws.close(1008, "A runner is already online.");
       let visitor;
       ws.alive = true;
       ws.on("pong", () => { ws.alive = true; });
-      ws.on("error", () => ws.terminate());
       const helloTimeout = isRunner ? undefined : setTimeout(() => ws.close(1008, "Room handshake timed out."), 5000);
       if (isRunner) {
-        runner = ws;
+        runner = { ws };
         reason = undefined;
-        send(ws, { type: "runner_online" });
         snapshot();
       }
       ws.on("message", (raw, binary) => {

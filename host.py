@@ -1,5 +1,6 @@
-"""Start the prepared FIFA invite room on the Windows host."""
+"""Start the FIFA lobby on the Windows host."""
 import configparser
+import json
 import os
 import shutil
 import subprocess
@@ -49,7 +50,7 @@ def main():
 
     required = (*LOCK["runtime"], "boxedwine.zip", "fifa325-pad.zip", "runner.html",
                 "shared-game.html", "shared-shell.js", "room.html", "runner.js", "player.js",
-                "peer.js", "controls.js", "game-bridge.js")
+                "peer.js", "controls.js", "seats.js", "game-bridge.js")
     if any(not (STAGE / name).is_file() for name in required) or not (HERE / "node_modules" / "ws" / "package.json").is_file():
         raise ValueError("Prepared files are missing. Run python prepare.py first.")
 
@@ -62,11 +63,13 @@ def main():
         if not 1 <= value <= 600:
             raise ValueError(f"{option} must be between 1 and 600 in {config_path}.")
         env["FIFA_" + option.upper()] = str(value)
-    for option, default in (("node_port", 18337), ("lan_port", 18444)):
-        port = config.getint(option, fallback=default)
-        if not 1024 <= port <= 65535:
-            raise ValueError(f"{option} must be between 1024 and 65535 in {config_path}.")
-        env["FIFA_" + option.upper()] = str(port)
+    try:
+        port = config.getint("lan_port", fallback=18444)
+    except ValueError:
+        raise ValueError(f"lan_port must be an integer in {config_path}.") from None
+    if not 1024 <= port <= 65535:
+        raise ValueError(f"lan_port must be between 1024 and 65535 in {config_path}.")
+    env["FIFA_LAN_PORT"] = str(port)
 
     lan_ip = config.get("lan_ip", "").strip()
     env.pop("FIFA_LAN_IP", None)
@@ -79,14 +82,23 @@ def main():
         certificate = public_certificate(caddy, env)
 
     with ExitStack() as processes:
-        origin = subprocess.Popen([node, "server.mjs"], cwd=HERE, env=env)
+        origin = subprocess.Popen([node, "server.mjs"], cwd=HERE, env=env,
+                                  stdout=subprocess.PIPE, text=True, encoding="utf-8")
+        processes.callback(origin.stdout.close)
         processes.callback(stop, origin)
         services = {"Node": origin}
+        ready = origin.stdout.readline()
+        if not ready:
+            raise RuntimeError(f"Node stopped before the runner was ready (exit code {origin.wait()}).")
+        listener = json.loads(ready)
+        env["FIFA_UPSTREAM"] = listener["upstream"]
+        print(f"Windows runner (keep this URL private): {listener['runnerUrl']}", flush=True)
         if lan_ip:
             proxy = subprocess.Popen([caddy, "run", "--config", str(SHARED / "Caddyfile"), "--adapter", "caddyfile"],
                                      cwd=HERE, env=env)
             processes.callback(stop, proxy)
             services["Caddy"] = proxy
+            print(f"LAN player address: https://{env['FIFA_LAN_IP']}:{env['FIFA_LAN_PORT']}", flush=True)
             print(f"Public CA certificate (available after Caddy starts): {certificate}", flush=True)
 
         print("Leave this terminal open while playing. Ctrl+C stops the invite host.", flush=True)

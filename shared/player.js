@@ -1,9 +1,15 @@
 import {codes,neutral,readPad} from "./controls.js";
 import {socket,localDescription} from "./peer.js";
+import {seatControls} from "./seats.js";
 const el = id=>document.getElementById(id);
 const video=el("screen"), status=el("status"), sound=el("sound");
 let ws, seat, session, pc, channel, keys=0, x=.5, y=.5, down=false;
 let seq=0, signature="", last=0, padIndex, enabled=false;
+let leavingSeat = false;
+const showSeats = seatControls(send, () => {
+  leavingSeat = true;
+  clearPeer();
+});
 const say = message => status.textContent=message;
 function transmit(force=false) {
   if (channel?.readyState!=="open" || channel.bufferedAmount>2048) return;
@@ -31,13 +37,7 @@ function clearPeer() {
   pc?.close();pc=null;
   video.srcObject=null;sound.hidden=true;
   el("stats").textContent="";
-  if (el("reconnect")) el("reconnect").hidden=true;
-}
-function buttons(phase) {
-  document.querySelectorAll("[data-seat]").forEach(b=>b.disabled=!!ws);
-  el("leave").hidden=!ws;
-  el("start").hidden=!(seat===1 && phase==="idle");
-  el("stop").hidden=!(seat===1 && ["starting","streaming"].includes(phase));
+  el("reconnect").hidden=true;
 }
 async function play() {
   const stream=video.srcObject;
@@ -51,11 +51,11 @@ function send(message) {
 
 function streamFailed(message) {
   say(message);
-  if (el("reconnect")) el("reconnect").hidden=false;
+  el("reconnect").hidden=false;
 }
 
 async function receiveOffer(m) {
-  if (!session || session!==m.session) return;
+  if (!seat || leavingSeat || session!==m.session) return;
   clearPeer();
   const current=pc=new RTCPeerConnection();
   const failed = message => {
@@ -84,29 +84,21 @@ async function receiveOffer(m) {
 
 function showRoom(state) {
   const phase=state?.phase;
-  const canWait=phase==="offline" || phase==="idle" || phase==="starting";
   const playing=!!state?.seat && phase==="streaming";
-  el("start").hidden=phase!=="idle";
-  el("wait").hidden=!canWait || !!state?.seat || state.waiting;
-  el("cancel").hidden=!state?.waiting;
-  el("join").hidden=phase!=="streaming" || !!state.seat || state.full;
-  el("stop").hidden=state?.seat!==1 || !["starting","streaming"].includes(phase);
+  showSeats(state);
   el("match").hidden=!playing;
   if (!state) return;
 
   const text=[];
   if (state.seat) text.push(`Player ${state.seat}`);
-  if (state.waiting) text.push(`Waiting · position ${state.position}`);
   if (phase==="offline") text.push("Windows runner offline. Enable it on the host PC.");
-  if (phase==="idle" && !state.waiting) text.push("Host as Player 1 or wait for someone else to host.");
+  if (phase==="idle") text.push("Waiting for the operator to start FIFA.");
   if (phase==="starting") text.push("Starting FIFA…");
   if (phase==="stopping") text.push("Ending session…");
   if (phase==="streaming") {
-    if (playing) text.push(state.full ? "Match active" : "Waiting for Player 2");
-    else text.push(state.full ? "Match full" : "Player 2 is available");
+    if (playing) text.push("FIFA is running.");
+    else text.push(Object.values(state.seats).includes("open") ? "Choose a seat." : "Both seats are taken.");
   }
-  if (state.hostAway) text.push("Player 1 reconnecting");
-  if (state.guestAway) text.push("Player 2 reconnecting");
   if (state.reason) text.push(state.reason);
   say(text.join(" · "));
   if (playing) {
@@ -117,11 +109,11 @@ function showRoom(state) {
 }
 
 function inviteRoom() {
-  const key="fifa-seat:"+location.pathname;
+  const key="fifa-seat";
   let credential, retry, leaving=false;
   try {credential=sessionStorage.getItem(key);} catch {}
   function connect() {
-    const connection=ws=socket("/signal"+location.pathname);
+    const connection=ws=socket("/signal/room");
     connection.onopen=()=>send({type:"hello",credential});
     connection.onmessage=e=>{
       if (ws!==connection) return;
@@ -131,27 +123,27 @@ function inviteRoom() {
         try {sessionStorage.setItem(key,credential);} catch {}
       }
       if (m.type==="status") {
-        if (session!==m.session || seat!==m.seat || m.phase==="stopping") clearPeer();
+        if (session!==m.session || seat!==m.seat) {
+          clearPeer();
+          leavingSeat = false;
+        }
         session=m.session;seat=m.seat;
         showRoom(m);
       }
       if (m.type==="offer") receiveOffer(m);
-      if (m.type==="peer_error" && m.session===session) streamFailed("Could not connect to the match stream.");
+      if (m.type==="peer_error" && seat && !leavingSeat && m.session===session) {
+        streamFailed("Could not connect to the match stream.");
+      }
     };
     connection.onclose=e=>{
       if (ws!==connection) return;
-      clearPeer();ws=null;session=null;seat=null;showRoom(null);
+      clearPeer();ws=null;session=null;seat=null;leavingSeat=false;showRoom(null);
       if (leaving) return;
       if (e.code===1008) return say(e.reason || "Room connection closed. Reload to try again.");
       say("Reconnecting to the room…");
       retry=setTimeout(connect,1000);
     };
   }
-  el("start").onclick=()=>send({type:"host"});
-  el("wait").onclick=()=>send({type:"wait"});
-  el("cancel").onclick=()=>send({type:"cancel_wait"});
-  el("join").onclick=()=>send({type:"join"});
-  el("stop").onclick=()=>send({type:"stop",session});
   el("reconnect").onclick=()=>ws?.close();
   window.addEventListener("pagehide",()=>{leaving=true;clearTimeout(retry);});
   window.addEventListener("pageshow",event=>{
@@ -160,33 +152,7 @@ function inviteRoom() {
   connect();
 }
 
-function prototype() {
-  document.querySelectorAll("[data-seat]").forEach(b=>b.onclick=()=>{
-    seat=Number(b.dataset.seat);
-    ws=socket("/signal/player/"+seat);
-    buttons();
-    ws.onclose=e=>{
-      clearPeer();ws=null;session=null;seat=null;buttons();
-      say(e.reason || "Disconnected. Choose a seat to join again.");
-    };
-    ws.onmessage=e=>{
-      const m=JSON.parse(e.data);
-      if (m.type==="status") {
-        if (session!==m.session || m.phase==="stopping") clearPeer();
-        session=m.session;
-        buttons(m.phase);
-        say("Player "+seat+" · "+m.phase+(m.reason ? " · "+m.reason:""));
-      }
-      if (m.type==="offer") receiveOffer(m);
-    };
-  });
-  el("start").onclick=()=>send({type:"start"});
-  el("stop").onclick=()=>send({type:"stop",session});
-  el("leave").onclick=()=>ws.close();
-}
-
-if (el("wait")) inviteRoom();
-else prototype();
+inviteRoom();
 sound.onclick=()=>{play();video.focus();};
 for (const event of ["keydown","keyup"]) window.addEventListener(event,e=>{
   const i=codes.indexOf(e.code);

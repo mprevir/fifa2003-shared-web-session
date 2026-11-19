@@ -5,12 +5,11 @@ import { createServer } from "node:http";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { localRunner } from "./shared/service.mjs";
+import { lanPlayer, localRunner } from "./shared/service.mjs";
 import { attachRoom } from "./shared/room.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const root = join(scriptDir, "stage");
-const port = Number(process.env.FIFA_NODE_PORT);
 const host = "127.0.0.1";
 
 async function inviteSettings() {
@@ -19,25 +18,26 @@ async function inviteSettings() {
     await mkdir(directory, { recursive: true });
     try {
         await writeFile(file, JSON.stringify({
-            roomId: randomBytes(16).toString("base64url"),
             runnerKey: randomBytes(32).toString("base64url"),
         }) + "\n", { flag: "wx", mode: 0o600 });
     } catch (error) {
         if (error.code !== "EEXIST") throw error;
     }
-    const { roomId, runnerKey } = JSON.parse(await readFile(file, "utf8"));
-    if (![roomId, runnerKey].every(value => typeof value === "string" && /^[\w-]+$/.test(value)) ||
-        roomId.length !== 22 || runnerKey.length !== 43) throw new Error("Invalid invite identity in " + file);
+    const { runnerKey } = JSON.parse(await readFile(file, "utf8"));
+    if (typeof runnerKey !== "string" || !/^[\w-]{43}$/.test(runnerKey)) {
+        throw new Error("Invalid runner key in " + file);
+    }
     const reconnectMs = Number(process.env.FIFA_RECONNECT_SECONDS ?? 30) * 1000;
     const startupMs = Number(process.env.FIFA_STARTUP_SECONDS ?? 180) * 1000;
     if (![reconnectMs, startupMs].every(value => Number.isInteger(value) && value >= 1000 && value <= 600000)) {
         throw new Error("Invite timeouts must be between 1 and 600 seconds.");
     }
-    return { roomId, runnerKey, reconnectMs, startupMs };
+    const playerHost = process.env.FIFA_LAN_IP && `${process.env.FIFA_LAN_IP}:${process.env.FIFA_LAN_PORT}`;
+    return { runnerKey, playerHost, reconnectMs, startupMs };
 }
 
 const room = await inviteSettings();
-const roomPath = `/room/${room.roomId}`;
+const playerAssets = new Set(["/player.js", "/peer.js", "/controls.js", "/seats.js"]);
 
 const mimeTypes = new Map([
     [".css", "text/css; charset=utf-8"],
@@ -59,10 +59,11 @@ function resolveRequestPath(pathname) {
 
 const server = createServer(async (request, response) => {
     let filePath;
-    let isRoom = false;
+    let pathname;
+    const isPlayer = lanPlayer(request, room.playerHost);
     try {
-        const { pathname } = new URL(request.url || "/", "http://localhost");
-        isRoom = pathname === roomPath;
+        ({ pathname } = new URL(request.url || "/", "http://localhost"));
+        const isRoom = pathname === "/" && isPlayer;
         filePath = resolveRequestPath(isRoom ? "/room.html" : pathname);
     } catch (error) {
         if (!(error instanceof URIError) && !(error instanceof TypeError)) throw error;
@@ -76,7 +77,10 @@ const server = createServer(async (request, response) => {
         response.end("Forbidden");
         return;
     }
-    if (!isRoom && filePath.toLowerCase() === join(root, "room.html").toLowerCase()) {
+    const isLobbyFile = ["room.html", "player.html"].some(name =>
+        filePath.toLowerCase() === join(root, name).toLowerCase());
+    if ((isPlayer && pathname !== "/" && !playerAssets.has(pathname)) ||
+        (!isPlayer && (!localRunner(request) || pathname === "/" || isLobbyFile))) {
         response.writeHead(404);
         response.end("Not found");
         return;
@@ -119,17 +123,10 @@ const server = createServer(async (request, response) => {
 
 attachRoom(server, room);
 server.on("error", error => {
-    console.error(error.code === "EADDRINUSE"
-        ? `Port ${port} is already in use on ${host}. Choose another node_port in host.cfg.`
-        : error.message);
+    console.error(error.message);
     process.exitCode = 1;
 });
-server.listen(port, host, () => {
-    const origin = `http://${host}:${server.address().port}`;
-    console.log(`Windows runner (keep this URL private): ${origin}/runner.html#key=${room.runnerKey}`);
-    console.log(`Local player invite: ${origin}${roomPath}`);
-    if (process.env.FIFA_LAN_IP) {
-        const lanPort = process.env.FIFA_LAN_PORT ?? 8444;
-        console.log(`LAN player invite: https://${process.env.FIFA_LAN_IP}:${lanPort}${roomPath}`);
-    }
+server.listen(0, host, () => {
+    const upstream = `${host}:${server.address().port}`;
+    console.log(JSON.stringify({ upstream, runnerUrl: `http://${upstream}/runner.html#key=${room.runnerKey}` }));
 });
