@@ -57,7 +57,8 @@ def main():
     settings = read_settings()
     config = settings["host"]
     env = os.environ.copy()
-    env["FIFA_NATIVE_EXE"] = str(native_executable(settings))
+    executable = native_executable(settings)
+    env["FIFA_NATIVE_EXE"] = str(executable)
     if not (HERE / "node_modules" / "ws" / "package.json").is_file():
         raise ValueError("Prepared files are missing. Run python prepare.py first.")
     env["FIFA_MANAGED_HOST"] = "1"
@@ -89,7 +90,8 @@ def main():
         certificate = public_certificate(caddy, env)
 
     with ExitStack() as processes:
-        origin = subprocess.Popen([node, "server.mjs"], cwd=HERE, env=env,
+        # Start the runner in the game folder as well as setting FIFA's own cwd.
+        origin = subprocess.Popen([node, str(HERE / "server.mjs")], cwd=executable.parent, env=env,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
         processes.callback(origin.stdout.close)
         processes.callback(stop_origin, origin)
