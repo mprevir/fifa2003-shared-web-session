@@ -16,7 +16,11 @@ export function nativeGame(executable) {
   async function start(onExit, isStarting) {
     await active?.closed;
     if (!isStarting()) return;
-    const child = spawn(executable, [], { cwd: dirname(executable), stdio: "ignore" });
+    // A shell's compatibility settings must not carry over to the game.
+    const env = Object.fromEntries(Object.entries(process.env).filter(
+      ([name]) => name.toUpperCase() !== "__COMPAT_LAYER",
+    ));
+    const child = spawn(executable, [], { cwd: dirname(executable), env, stdio: "ignore" });
     const game = active = { child, stopping: false };
     game.closed = new Promise(resolve => child.once("close", (code, signal) => {
       if (active === game) active = undefined;

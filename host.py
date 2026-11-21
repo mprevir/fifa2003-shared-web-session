@@ -81,6 +81,7 @@ def main():
 
     lan_ip = config.get("lan_ip", "").strip()
     env.pop("FIFA_LAN_IP", None)
+    env.pop("__COMPAT_LAYER", None)
     if lan_ip:
         address = IPv4Address(lan_ip)
         if address.is_unspecified or address.is_loopback or address.is_multicast:
